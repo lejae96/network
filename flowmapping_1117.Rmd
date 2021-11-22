@@ -1,0 +1,1074 @@
+---
+title: "Flow Mapping and Network Analysis using the tidygraph and ggraph package"
+subtitle: 서울시 생활이동데이터
+author: "이재건"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: haddock
+    self_contained: yes
+    gallery: yes
+    number_sections: yes
+    pandoc_args: --number-offset=0
+    code_folding: show
+    toc_depth: 4
+    lightbox: yes
+---
+
+```{r setup, echo=FALSE, warning=FALSE, message=FALSE}
+require(knitr); require(rmdformats); require("DT")
+
+options(width="480"); options(max.print="75")
+options(digits=3); options(scipen=1000)
+options(DT.options = list(class="display compact nowrap hover",
+                          rownames=FALSE));
+options(encoding = 'UTF-8')
+knitr::opts_chunk$set(
+	echo = TRUE, message = FALSE, warning = FALSE, cache = FALSE,
+	comment = ":)  ", collapse = FALSE, prompt = FALSE, tidy = FALSE,
+	fig.align="center", fig.retina=2.5,
+ aliases=c(h = 'fig.height', w = 'fig.width')
+)
+
+knitr::opts_knit$set(width=75)
+```	
+		   
+```{r include=FALSE}
+# free memory & and garbage collection
+rm(list = ls()); gc()
+set.seed(1004)
+```
+
+> R Setup
+
+```{r}
+#install.packages("tidygraph")
+#install.packages("sfnetworks")    
+#install.packages("ggraph")
+#install.packages("furrr")
+```
+
+```{r}
+library(tidyverse)
+library(DescTools)
+library(kableExtra)
+library(rgdal)
+library(rgeos)
+library(sf)
+library(raster)
+library(spdep)
+library(tmap)
+library(tmaptools)
+library(cartogram)
+library(viridisLite)
+library(patchwork)
+library(xts)
+library(data.table)
+library(od)
+library(viridisLite)
+library(DT)
+library(foreach)
+library(doParallel)
+library(igraph)
+library(tidygraph)
+library(ggraph)
+library(furrr)
+```
+
+\ 
+\
+
+# Import Data
+## Map
+```{r}
+dong.sf <- sf::st_read("shp/seoul_dong_EPSG_5179/seoul_dong_EPSG_5179.shp")
+```
+
+```{r}
+dong_reorder.sf <- dong.sf[, c(5, 1, 2, 3, 4, 6, 7)]
+```
+
+## Flow Data
+thanks to YongHun
+```{r}
+#fi <-  paste0("./data/flow_2021_aug/", list.files(path = "./data/flow_2021_aug/"))
+#
+#
+#for(i in 1:length(fi)){
+#    print(i-1)
+#  assign(paste0("flow_2021_aug_time_",i-1), read_csv(fi[i], locale=locale('ko',encoding='euc-kr'))) 
+#  
+#  temp <- eval(as.symbol(paste0("flow_2021_aug_time_",i-1)))
+#  
+#  colnames(temp) <- c("DEPRT_YM", "DAYOFWEEK", "DEPRT_HOUR", "DEPRTP", "DESTNTN", "GENDER", "AGE_GR", "FLOW_TYPE", "TRVL_TIME", #"LIFE_FLPOP")
+#  
+#  temp <- temp %>%
+#      mutate_at(1:9, as.character) %>%
+#      mutate(LIFE_FLPOP = replace(LIFE_FLPOP, LIFE_FLPOP=="*", "2")) %>%
+#      mutate(LIFE_FLPOP = as.numeric(LIFE_FLPOP)) %>%
+#      filter(str_sub(DEPRTP, 1, 2) == "11",
+#             str_sub(DESTNTN, 1, 2) == "11")
+#
+#
+#  if (i == 1){
+#    flow_2021_aug <- plyr::rbind.fill(temp)
+#    rm(flow_2021_aug_time_0) # 부산물 삭제
+#  } else {
+#    flow_2021_aug <- plyr::rbind.fill(flow_2021_aug, temp)
+#    rm(list = as.character(paste0("flow_2021_aug_time_",i-1)),temp) #부산물 삭제
+#  }
+#  
+#}
+#
+```
+
+```{r}
+#flow_2021_aug %>% 
+#    write_csv("flow_2021_aug.csv")
+```
+
+```{r}
+flow_2021_aug_time_08 <- read_csv("data/flow_2021_aug/flow_2021_aug_time_08.csv", locale=locale('ko',encoding='euc-kr')) 
+
+colnames(flow_2021_aug_time_08) <- c("DEPRT_YM", "DAYOFWEEK", "DEPRT_HOUR", "DEPRTP", "DESTNTN", "GENDER", "AGE_GR", "FLOW_TYPE", "TRVL_TIME", "LIFE_FLPOP")
+
+flow_2021_aug_time_08 <- flow_2021_aug_time_08 %>%
+    mutate_at(1:9, as.character) %>%
+    mutate(LIFE_FLPOP = replace(LIFE_FLPOP, LIFE_FLPOP=="*", "2")) %>%
+    mutate(LIFE_FLPOP = as.numeric(LIFE_FLPOP)) 
+
+flow_2021_aug_time_08 <- flow_2021_aug_time_08 %>%
+    filter(str_sub(DEPRTP, 1, 2) == "11",
+           str_sub(DESTNTN, 1, 2) == "11")
+```
+
+```{r}
+flow_2021_aug_time_08 <- flow_2021_aug_time_08[, c(4, 5, 1, 2, 3, 6, 7, 8, 9, 10)]
+flow_2021_aug_time_08
+```
+
+
+# Join the Flow Data with the Map 
+use the "od" package
+```{r}
+flow_2021_aug_time_08_mapped <- flow_2021_aug_time_08 %>%
+    slice(sample(1:n())) %>%           # random sorting row-wise
+    dplyr::slice(1:100000) %>%
+    od::od_to_sf(dong_reorder.sf,
+           zd = NULL,
+           odc = NULL,
+           filter = TRUE,
+           crs = 5179)
+```
+
+you get an sf-lines object
+```{r}
+#flow_2021_aug_time_08_mapped_tibble <- flow_2021_aug_time_08_mapped %>%
+#    st_drop_geometry()
+#flow_2021_aug_time_08_mapped_tibble
+```
+
+\
+\
+ 
+# Flow Mapping
+## Set a Function
+```{r}
+dong_borders <- tm_shape(dong_reorder.sf) +     
+  tm_borders(alpha = 0.1,
+             lwd = 0.1 ) 
+    
+#sgg_borders <- tm_shape(sgg.sf) +     
+#  tm_borders(col = "grey",   
+#             alpha = 1,
+#             lwd = 2)  
+```
+
+```{r}
+map_function <- function(gender, age){
+
+dong_borders +
+        
+tm_shape(flow_2021_aug_time_08_mapped %>%
+            filter(
+                   #DAYOFWEEK == day,
+                   GENDER == gender,
+                   AGE_GR == age)) +
+        
+          tm_lines(lwd = "LIFE_FLPOP",
+                     col = "blue",
+                     scale = 4,
+                     alpha = 0.03,
+                     legend.lwd.show = TRUE) +
+          tm_layout(main.title = str_c("08시  ",
+                                       #as.character(day), "요일  ",
+                                       as.character(gender), "성  ",
+                                       as.character(age), "대")
+                    ) +
+            
+tm_layout(inner.margins = c(0.15,0.15,0.1,0.1))
+            
+        } 
+```
+
+## an Example
+```{r}
+map_function("M", "50") 
+```
+
+## Multiple Maps at once
+use the `furrr` package
+```{r}
+#lists_of_inputs <- list(day = "월",
+#                        gender = "M",
+#                        age = c("20", "30", "40", "50", "60")
+#                        )
+#
+#lists_of_maps_2021_aug_time_08_mon_EH <- list()
+#
+#future::plan(multisession, workers = 8)
+#
+#lists_of_maps_2021_aug_time_08_mon_EH <- future_pmap(lists_of_inputs, map_function)
+#
+#future:::ClusterRegistry("stop")
+```
+
+```{r}
+#timely_slots <- function(data) {
+#    tmap_arrange(data[[1]],
+#             data[[2]],
+#             data[[3]],
+#             data[[4]],
+#             data[[5]])
+#}
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 20, fig.height = 4}
+#future::plan(multisession, workers = 8)
+#
+#timely_slots(lists_of_maps_2021_aug_time_08_mon_EH)
+#
+#future:::ClusterRegistry("stop")
+```
+
+# Network Analysis Using the `tidygraph` Package
+use the `tidygraph` package for analysis and the `ggraph` package for visualization
+it is analogous to the `tidyverse`-`ggplot2` relationship
+
+Note : the flow network we are dealing with is a spatially embedded network. But for this time, we will go through aspatial network analysis. It means that we will get rid of the map behind, ignore the locality of each node and the distance between any two nodes.
+
+## Flow Map to a `tbl_graph` Object
+```{r}
+flow_2021_aug_time_08_graphed <- flow_2021_aug_time_08 %>%
+    as_tbl_graph()
+```
+
+```{r}
+rm(flow_2021_aug_time_08)
+```
+
+this `tbl_object` consists of the Node data in a tidy format and the corresponding Edge data also in a edge format.
+although it shows them separately, it recognizes the whole related structure of the network. 
+```{r}
+flow_2021_aug_time_08_graphed
+```
+
+smaller network
+```{r}
+flow_2021_aug_time_08_graphed %>%
+    activate(edges) %>%
+    filter(AGE_GR == "50", GENDER == "M", FLOW_TYPE == "HE", DAYOFWEEK == "월")
+```
+
+## Centrality 
+### Non-Weighted
+```{r}
+flow_2021_aug_time_08_graphed_cen <- flow_2021_aug_time_08_graphed %>%
+    activate(edges) %>%
+    filter(AGE_GR == "50", GENDER == "M", FLOW_TYPE == "HE", DAYOFWEEK == "월") %>%
+    activate(nodes) %>%
+    mutate(deg_cen = centrality_degree(),
+           bet_cen = centrality_betweenness(),
+           page_cen = centrality_pagerank()) %>%
+    arrange(desc(bet_cen))
+flow_2021_aug_time_08_graphed_cen %>% as_tibble
+```
+
+```{r}
+dong.sf_cen <- dong.sf %>%
+    left_join(flow_2021_aug_time_08_graphed_cen %>% as_tibble,
+              by = c("ADM_CD" = "name"))
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 12, fig.height = 4}
+deg_cen <- tm_shape(dong.sf_cen) +
+    tm_polygons("deg_cen")
+bet_cen <- tm_shape(dong.sf_cen) +
+    tm_polygons("bet_cen")
+page_cen <- tm_shape(dong.sf_cen) +
+    tm_polygons("page_cen")
+
+tmap_arrange(deg_cen, bet_cen, page_cen)
+```
+
+### Considering the Weight while Calculating Centrality Measures
+Note : the network we are dealing with right now is a weighted network
+set weight as the flow volume(or the flow population) of the edges adjacent to each node
+```{r}
+flow_2021_aug_time_08_graphed_cen <- flow_2021_aug_time_08_graphed %>%
+    activate(edges) %>%
+    filter(AGE_GR == "50", GENDER == "M", FLOW_TYPE == "HE", DAYOFWEEK == "월") %>%
+    activate(nodes) %>%
+    mutate(deg_cen = centrality_degree(weights = LIFE_FLPOP),
+           bet_cen = centrality_betweenness(weights = LIFE_FLPOP),
+           page_cen = centrality_pagerank(weights = LIFE_FLPOP)) %>%
+    arrange(desc(bet_cen))
+flow_2021_aug_time_08_graphed_cen %>% as_tibble
+```
+
+```{r}
+dong.sf_cen <- dong.sf %>%
+    left_join(flow_2021_aug_time_08_graphed_cen %>% as_tibble,
+              by = c("ADM_CD" = "name"))
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 12, fig.height = 4}
+deg_cen <- tm_shape(dong.sf_cen) +
+    tm_polygons("deg_cen")
+bet_cen <- tm_shape(dong.sf_cen) +
+    tm_polygons("bet_cen")
+page_cen <- tm_shape(dong.sf_cen) +
+    tm_polygons("page_cen")
+
+tmap_arrange(deg_cen, bet_cen, page_cen)
+```
+
+### Considering the Direction while Calculating Centrality Ceasures
+Note : the network we are dealing with right now is a directed network
+```{r}
+flow_2021_aug_time_08_graphed_cen <- flow_2021_aug_time_08_graphed %>%
+    activate(edges) %>%
+    filter(AGE_GR == "50", GENDER == "M", FLOW_TYPE == "HE", DAYOFWEEK == "월") %>%
+    activate(nodes) %>%
+    mutate(deg_cen = centrality_degree(mode = "all"),
+           deg_cen_in = centrality_degree(mode = "in"),
+           deg_cen_out = centrality_degree(mode = "out")) %>%
+    arrange(desc(deg_cen))
+flow_2021_aug_time_08_graphed_cen %>% as_tibble
+```
+
+```{r}
+dong.sf_cen <- dong.sf %>%
+    left_join(flow_2021_aug_time_08_graphed_cen %>% as_tibble,
+              by = c("ADM_CD" = "name"))
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 12, fig.height = 4}
+deg_cen <- tm_shape(dong.sf_cen) +
+    tm_polygons("deg_cen")
+deg_cen_in <- tm_shape(dong.sf_cen) +
+    tm_polygons("deg_cen_in")
+deg_cen_out <- tm_shape(dong.sf_cen) +
+    tm_polygons("deg_cen_out")
+
+tmap_arrange(deg_cen, deg_cen_in, deg_cen_out)
+```
+
+```{r}
+rm(flow_2021_aug_time_08_graphed_cen, deg_cen, bet_cen, page_cen, deg_cen, deg_cen_in, deg_cen_out, dong.sf_cen)
+```
+
+## Adding more Attributes to the `tbl_graph`object
+### the Han River
+Is the node you are departing gangbuk?
+Is the node you are heading to gangnam?
+Is the edge of your travel crossing the Han River? 
+```{r}
+flow_2021_aug_time_08_graphed_gang <- flow_2021_aug_time_08_graphed %>%
+    activate(nodes) %>%
+    arrange(name) %>%                   # important
+    mutate(GU = str_sub(name, 3, 4)) %>%
+    mutate(hanriver = case_when(
+        as.numeric(GU) < 15 ~ "gangbuk",
+        as.numeric(GU) >= 15 ~ "gangnam")) %>%
+
+    activate(edges) %>%
+    filter(DAYOFWEEK == "월") %>%
+    slice(sample(1:n())) %>%           # random sorting row-wise
+    dplyr::slice(1:5000) %>%                # slicing should precede the arranging
+    arrange(from, to) %>%               # important
+        mutate(across(1:2, ~.N()$hanriver[.], .names = "{.col}_distinguish")) %>%
+    mutate(crosstheriver = (from_distinguish != to_distinguish))
+
+flow_2021_aug_time_08_graphed_gang
+```
+
+```{r}
+print(flow_2021_aug_time_08_graphed_gang)
+```
+
+### Visualization
+We use the `ggraph` package.
+```{r}
+flow_2021_aug_time_08_graphed_gang %>%
+    ggraph::ggraph() +
+    ggraph::geom_edge_link(aes(alpha = crosstheriver)) +
+    ggraph::geom_node_point(aes(color = hanriver),
+                    palette = "Set1") 
+```
+
+\
+\
+
+## Convert
+`convert`is one of the most important verbs in the `tidygraph` package.
+It can convert the network to an undirected network, a more simple network and a contracted network.
+
+### Simple
+#### Purpose
+Note : the flow data we are dealing with consists of the flows of a range of socioeconomic classes distinguished by gender and age. Therefore the flow between A and B is not a single edge and it actually consists of multiple edges as many as the number of classes. 
+We will collapse the parallel edges to a single edge.
+We will also collapse the loops(travels within a `DONG`).
+We call the resultant network a simple network.
+
+#### Action
+Because you collapsed multiple edges into a single edge, the detail attributes of the original edges are contained in a single cell of each row, in a `tibble` format, under the `.orig_data` column. 
+```{r}
+flow_2021_aug_time_08_graphed_simple <- flow_2021_aug_time_08_graphed_gang %>%
+    convert(to_simple) 
+
+flow_2021_aug_time_08_graphed_simple 
+```
+
+```{r}
+rm(flow_2021_aug_time_08_graphed_gang)
+```
+
+inside the `.orig_data`
+there must have been multiple edges in a `.orig_data`, if we had used the original network data, not a small one with random `5000` edges.
+```{r}
+flow_2021_aug_time_08_graphed_simple %>%
+    activate(edges) %>%
+    pull(.orig_data) %>%
+    pluck(1)
+```
+
+#### Weighting the Simple Network
+You can calculate the each `tibble` of `.orig_data`.
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted <- flow_2021_aug_time_08_graphed_simple %>%
+    activate(edges) %>%
+    mutate(weight = map_dbl(.orig_data, ~.x %>% pull(LIFE_FLPOP) %>% sum())) %>%
+    mutate(crosstheriver = map_dbl(.orig_data, ~.x %>% pull(crosstheriver) %>% sum()) > 0)
+flow_2021_aug_time_08_graphed_simple_weighted
+```
+
+The edges crossing the river do not seem to have a large flow volume.
+Does the Han River affect people's journey to work travel pattern?
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    ggraph::ggraph() +
+    ggraph::geom_edge_link(aes(alpha = weight)) +
+    ggraph::geom_node_point(aes(color = hanriver))
+```
+
+### Contraction
+#### Purpose
+The network has too many nodes and edges.
+By aggregating a large number of nodes to a higher level of abstraction, specifically, from `DONGs` to `GUs`, we can contract the network into a more concise version.
+
+#### Action
+Define a factor variable as `GUs`
+```{r}
+factor_gu <- flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    arrange(GU) %>%
+    pull(GU) %>%
+    factor() 
+factor_gu
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted <- flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(level_as_integer = as.integer(factor_gu)) %>%
+    convert(to_contracted, level_as_integer) %>%
+    mutate(GU = levels(factor_gu)) 
+
+flow_2021_aug_time_08_graphed_simple_weighted_contracted
+```
+
+
+almost 25 * 25 = 625 edges?
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(edges) %>%
+    as_tibble()
+```
+
+inside the `.orig_data`
+there must have been multiple edges in a `.orig_data`, if we had used the original network data, not a small one with random `5000` edges.
+Note that the `weight` is a summary(sum) of `LIFE_FLPOP`.
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(edges) %>%
+    pull(.orig_data) %>%
+    pluck(1)
+```
+
+inside the `.orig_data`
+all the `DONGs` in Jongro-gu
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(nodes) %>%
+    pull(.orig_data) %>%
+    pluck(1)
+```
+
+#### Weighting the Simple-Contracted Network
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted <- flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(edges) %>%
+    mutate(weight_contracted = map_dbl(.orig_data, ~.x %>% pull(weight) %>% sum()))
+
+flow_2021_aug_time_08_graphed_simple_weighted_contracted
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+
+    ggraph::ggraph() +
+    ggraph::geom_node_label(aes(label = GU)) +
+    ggraph::geom_edge_link(aes(alpha = weight_contracted))
+```
+
+
+## Filtering Edges and Nodes that are Adjacent to Certain Nodes of Interest  
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(edges) %>%
+    mutate(incident_01 = edge_is_incident(.N()$GU == "01")) %>%
+    filter(incident_01) %>%
+    
+    activate(nodes) %>%
+    mutate(jongro = ifelse(GU == "01", 1, 0)) %>%
+    
+    ggraph::ggraph() +
+    ggraph::geom_node_point(aes(color = GU, size = jongro)) +
+    ggraph::geom_edge_link()
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(adjacent_01 = node_is_adjacent(GU == "01"),
+           include_to = FALSE) %>%
+    filter(adjacent_01) %>%
+    mutate(jongro = ifelse(GU == "01", 1, 0)) %>%
+    
+    ggraph::ggraph() +
+    ggraph::geom_node_point(aes(color = GU, size = jongro)) +
+    ggraph::geom_edge_link(aes(alpha = weight))
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(edges) %>%
+    mutate(incident_01 = edge_is_incident(.N()$GU == "01")) %>%
+    filter(incident_01) %>%
+    
+    activate(nodes) %>%
+    mutate(adjacent_01 = node_is_adjacent(GU == "01"),
+           include_to = FALSE) %>%
+    filter(adjacent_01) %>%
+    mutate(jongro = ifelse(GU == "01", 1, 0)) %>%
+
+    ggraph::ggraph() +
+    geom_node_point(aes(color = GU, size = jongro)) +
+    geom_edge_link(aes(alpha = weight))
+```
+
+
+## Shortest Path
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(
+        distance_to_jongro = node_distance_to(GU == "01"),
+        distance_from_jongro = node_distance_from(GU == "01")
+    ) %>%
+    as_tibble()   
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(distance_to_jongro = node_distance_to(GU == "01"),
+           distance_from_jongro = node_distance_from(GU == "01")) %>%
+    convert(to_shortest_path, GU == "01", GU == "02") 
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+
+            morph(to_shortest_path, GU == "01", GU == "02") %>%   
+            activate(nodes) %>%
+            mutate(node_from_jongro_jung = TRUE) %>%
+            activate(edges) %>%
+            mutate(edge_from_jongro_jung = TRUE) %>%
+            unmorph() %>%
+    
+    activate(nodes) %>%
+    mutate(node_from_jongro_jung = !is.na(node_from_jongro_jung)) %>%
+    activate(edges) %>%
+    mutate(edge_from_jongro_jung = !is.na(edge_from_jongro_jung)) %>%
+    
+    ggraph::ggraph() +
+    
+    ggraph::geom_edge_link(aes(alpha = edge_from_jongro_jung)) +
+    ggraph::geom_node_point(aes(color = node_from_jongro_jung))
+```
+
+
+## Centrality Revisited
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted_centrality <- flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(edges) %>%
+    mutate(weight_contracted = map_dbl(.orig_data, ~.x %>% pull(weight) %>% sum())) %>%
+
+    activate(nodes) %>%
+    mutate(degree_cen = centrality_degree(weights = weight_contracted),
+           between_cen = centrality_betweenness(weights = weight_contracted),
+           eigen_cen = centrality_eigen(weights = weight_contracted)) %>%
+        
+    arrange(desc(degree_cen))
+
+flow_2021_aug_time_08_graphed_simple_weighted_contracted_centrality %>%
+    activate(nodes) %>%
+    as_tibble() %>%
+    select(GU, degree_cen, between_cen, eigen_cen) %>%
+    DT::datatable()
+```
+
+
+```{r fig.align="center", echo = FALSE,fig.width = 12, fig.height = 3}
+n1 <- flow_2021_aug_time_08_graphed_simple_weighted_contracted_centrality %>%
+    ggraph::ggraph() +
+    ggraph::geom_node_label(aes(label = GU, size = degree_cen)) +
+    ggraph::geom_edge_link(aes(alpha = weight_contracted))
+
+n2 <- flow_2021_aug_time_08_graphed_simple_weighted_contracted_centrality %>%
+    ggraph::ggraph() +
+    ggraph::geom_node_label(aes(label = GU, size = between_cen)) +
+    ggraph::geom_edge_link(aes(alpha = weight_contracted))
+
+n3 <- flow_2021_aug_time_08_graphed_simple_weighted_contracted_centrality %>%
+    ggraph::ggraph() +
+    ggraph::geom_node_label(aes(label = GU, size = eigen_cen)) +
+    ggraph::geom_edge_link(aes(alpha = weight_contracted))
+
+ggpubr::ggarrange(n1, n2, n3, nrow = 1)
+```
+
+```{r}
+rm(flow_2021_aug_time_08_graphed_simple_weighted_contracted_centrality)
+rm(n1, n2, n3)
+```
+
+
+## The Overall Structure of a Network
+### Order
+### Size
+### Density
+#### Density of the `DONG` to `DONG` Network
+```{r}
+flow_2021_aug_time_08_graphed %>%
+    activate(nodes) %>%
+    arrange(name) %>%
+    
+    activate(edges) %>%
+    arrange(from, to) %>%
+    
+    convert(to_simple) %>%
+    edge_density()
+```
+
+#### Density of the `GU` to `GU` Network
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    edge_density()
+```
+
+### Mean Distance
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    mean_distance()
+```
+
+Is a full density network an all mutually connected network?
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    mean_distance()
+```
+
+### Transitivity
+Transitivity means the tendency that triplets from triangles(Gastner, 2021).
+
+#### Triangles
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(n_tri = local_triangles()) %>%
+    as_tibble()
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(nodes) %>%
+    mutate(n_tri = local_triangles()) %>%
+    as_tibble()
+```
+
+#### Global Clustering Coefficient
+```{r}
+total_num_triangles <- flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(n_tri = local_triangles()) %>%
+    as_tibble() %>%
+    pull(n_tri) %>%
+    sum() / 3
+total_num_triangles
+
+# total_num_triangles * 3 / total num of triplets
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    transitivity()
+```
+
+Is a full density network an all mutually connected network and also a full triangl-ed network?
+```{r}
+total_num_triangles <- flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(nodes) %>%
+    mutate(n_tri = local_triangles()) %>%
+    as_tibble() %>%
+    pull(n_tri) %>%
+    sum() / 3
+total_num_triangles
+
+# total_num_triangles * 3 / total num of triplets
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    transitivity()
+```
+
+#### Local Clustering Coefficient
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(local_clust_coeff = local_transitivity()) %>%
+    as_tibble()
+```
+
+Why do the lower-betweenness-centrality nodes on the periphery have higher local_clustering coefficient? 
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(bet_cen = centrality_betweenness(weights = weight)) %>%
+    mutate(local_clust_coeff = local_transitivity()) %>%
+    
+    ggraph::ggraph() +
+    ggraph::geom_node_point(aes(color = bet_cen, size = local_clust_coeff)) +
+    ggraph::geom_edge_link(aes(alpha = weight))
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(nodes) %>%
+    mutate(local_clust_coeff = local_transitivity()) %>%
+    as_tibble()
+```
+
+
+
+Why do the low-degree-centrality nodes on the periphery have higher local_clustering coefficient? 
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    activate(nodes) %>%
+    mutate(local_clust_coeff = local_transitivity()) %>%
+    mutate(bet_cen = centrality_betweenness(weights = weight_contracted)) %>%
+    
+    activate(edges) %>%
+    
+    ggraph::ggraph() +
+    ggraph::geom_node_point(aes(color = bet_cen, size = local_clust_coeff)) +
+    ggraph::geom_edge_link(aes(alpha = weight_contracted))
+```
+
+### Reciprocity
+Among the edges(except loops), how many of them have counterparts which connect the same pair of nodes but coming from the opposite direction? 
+
+Note : Making a network a simple network does not mean that the two edges connecting the same pair of nodes in the opposite direction are combined into an undirected edge.
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    reciprocity()
+```
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_contracted %>%
+    reciprocity()
+```
+
+### Assortativity(Degree-Degree Coefficient)
+
+
+
+## Determining Communities
+### Cliques
+A clique is a generalized version of a triangular.
+A clique consisting of $n$ nodes has as many edges as possible, $n(n-1)$.
+We call a clique "maximal" when ... .
+Note : A clique is not "maximal" when it is a subset of a larger clique.
+
+There are more than 3000 maximal cliques in this network.You get a result in a `list` format.
+```{r}
+#flow_2021_aug_time_08_graphed_simple_weighted %>%
+#    max_cliques()
+```
+
+By the way, please check the powerful functions used below.
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    max_cliques() %>%    
+    map(~ names(.x)) %>%
+    as_tibble_col(column_name = "name") %>%      # coercing list -> tibble
+    rowid_to_column("clique_id") 
+```
+
+```{r}
+max_clique_tibble <- flow_2021_aug_time_08_graphed_simple_weighted %>%
+    max_cliques() %>%    
+    map(~ names(.x)) %>%
+    as_tibble_col(column_name = "name") %>%      # coercing list -> tibble
+    rowid_to_column("clique_id") %>%
+    unnest()
+max_clique_tibble
+```
+
+Save the coordinates using a `layout_tbl_graph` object.
+```{r}
+flow_layout <- flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(local_clust_coeff = local_transitivity()) %>%
+    mutate(bet_cen = centrality_betweenness(weights = weight)) %>%
+    
+    create_layout(layout = "stress")        
+flow_layout
+```
+
+Save the `maximal clique` information with the `flow_layout coordinates`. 
+```{r}
+clique_coordinates <- max_clique_tibble %>%
+    left_join(flow_layout, by = "name")
+
+clique_coordinates  
+```
+
+```{r}
+library(ggforce)
+```
+
+The `layout_tbl_object` remembers the topology of a network and we can use it as an input data for visualization like below. 
+```{r}
+flow_layout %>%
+    
+    ggraph::ggraph() +
+    ggraph::geom_edge_link(aes(alpha = weight)) +
+    ggraph::geom_node_point(aes(color = GU, size = local_clust_coeff))
+```
+
+```{r}
+flow_layout %>%
+    
+    ggraph::ggraph() +
+    geom_mark_hull(data = clique_coordinates,        # it needs a separate input
+                   aes(x, y,
+                       fill = as.factor(clique_id),
+                       label = str_c("clique", clique_id)),
+                   colour = NA,  # Do not draw an outline around the cliques
+                   con.colour = "grey",
+                   show.legend = FALSE) +
+    ggraph::geom_edge_fan(aes(alpha = weight)) +
+    ggraph::geom_node_point(aes(color = GU, size = local_clust_coeff)) 
+```
+
+```{r}
+rm(flow_layout, max_clique_tibble, clique_coordinates)
+```
+
+### Connected Components
+A `Connected Component`, compared to a `clique`, has a weaker(less strict) definition of a "community".
+Define each node's membership using the `component_id` column.
+
+#### Undirected Network 
+```{r}
+component_info_undirected <- flow_2021_aug_time_08_graphed_simple_weighted %>%
+    convert(to_undirected) %>%
+    activate(nodes) %>%
+    mutate(component_id = group_components()) %>%
+    as_tibble()
+
+component_info_undirected
+```
+
+A single `connected component`!
+```{r}
+component_info_undirected %>%
+    group_by(component_id) %>%
+    group_split() %>%
+    map(pluck("name"))
+```
+
+#### Directed Component
+Unlike searching for `undirected components`, searching for `undirected components` requires you distinguish between `weakly connection` and `strongly connection`.
+```{r}
+component_info_directed <-
+    flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(weak_id = group_components(),               # default : "week"
+           strong_id = group_components(type = "strong")) %>%
+    as_tibble()
+  
+component_info_directed  
+```
+
+the members of the first (and the only) group
+```{r}
+component_info_directed %>%
+    group_by(weak_id) %>%
+    group_split() %>%
+    map(pluck("name"))      
+```
+
+
+```{r}
+directed_component_function <- function(type) {
+    component_info_directed %>%
+        group_by(eval(sym(str_c(type, "_id"))))%>%     # either "eval function" or "!!" works(thanks to YongHun)
+        group_split() %>%
+        map(pluck("name"))
+}
+```
+
+```{r}
+directed_component_function("weak")
+```
+
+Are the six "single" nodes isolated?
+```{r}
+directed_component_function("strong")
+```
+
+Those six nodes are connected to the whole network, but only in one direction. May be it is outflow, given that it is 8a.m. in the morning.
+```{r}
+isos <- c("1121068", "1117067", "1115060", "1113070", "1111059", "1108059")
+
+flow_2021_aug_time_08_graphed_simple_weighted %>%
+    activate(nodes) %>%
+    mutate(isolated = ifelse(name %in% isos, TRUE, FALSE) ) %>%
+    ggraph::ggraph() +
+    ggraph::geom_node_point(aes(col = isolated, alpha = isolated)) +
+    ggraph::geom_edge_link(aes(alpha = weight))
+```
+
+```{r}
+rm(component_info_directed, isos)
+```
+
+## Communities (Highlight)
+`Cliques` and `Connected Components` are all communities, but they are both extreme cases.
+The former is literally a "family", which means that every member knows each other no matter how large the group is.
+The latter is like "a lonely island", which means that the group does not have any bridge to connect to the other place of the world.
+So there is a need to define a softer `community` which allows both "a few absence of edges within a group" and also "a number of bridges to the other place of the world".
+
+To find this "compromised" communities, we have to use some specific algorithms.
+
+We will use Blondel et al. (2008)'s `Louvain Algorithm`.
+
+Note : the `Louvain Algorithm` only works on undirected networks.
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_louvain <- flow_2021_aug_time_08_graphed_simple_weighted %>%
+    convert(to_undirected) %>%
+    activate(nodes) %>%
+    mutate(deg_cen = centrality_degree(weights = weight)) %>%
+    mutate(community_id = group_louvain()) %>%
+    mutate(community_id = factor(community_id))
+flow_2021_aug_time_08_graphed_simple_weighted_louvain
+```
+
+6 communities
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_louvain %>%
+    as_tibble() %>%
+    group_by(community_id) %>%
+    group_split() 
+```
+
+the membership list
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_louvain %>%
+    as_tibble() %>%
+    group_by(community_id) %>%
+    group_split() %>%
+    map(pluck("name"))
+```
+
+### Visualization
+```{r}
+community_membership_info <- flow_2021_aug_time_08_graphed_simple_weighted_louvain %>%
+    activate(nodes) %>%
+    as_tibble()  
+
+community_membership_info %>%
+    group_by(community_id)
+```
+
+```{r}
+dong.sf_commune <- dong.sf %>%
+    left_join(community_membership_info,
+              by = c("ADM_CD" = "name")) 
+
+dong.sf_commune %>%
+    st_drop_geometry()
+```
+
+
+```{r}
+flow_2021_aug_time_08_graphed_simple_weighted_louvain %>%
+    ggraph::ggraph() +
+    ggraph::geom_edge_link(aes(alpha = weight)) +
+    ggraph::geom_node_point(aes(color = community_id, size = deg_cen)) 
+```
+
+### Projecting the communities on the Real World Geography
+It seems like the `community detection` algorithm has partitioned the real world geography of Seoul in to 6 communities.
+```{r}
+tm_shape(dong.sf_commune) +
+    tm_polygons("community_id")
+```
+  
+The problem is that each community is not a spatially contiguous region, because there are several members surrounded by the members of other groups.
+Geographers might be more interested in finding spatially contiguous regions, so there is a need for a new method which imposes a spatially contiguous constraint on the `community detection` for aspatial networks. In other words, we need a new `community detection` method for spatial networks. Thankfully, the method is already developed and they it is called the `regionalization` method. 
+
+We have analyzed the Seoul Flow Network, regarding it as a aspatial network. Next time, by adding the `sfnetworks` package, on top of the `tidygraph` - `ggraph` framework, we will analyze the Seoul Flow Network as a spatial network.
+
+
+
+
+
+
+
+
+
+
+
+
+
