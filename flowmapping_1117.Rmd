@@ -78,6 +78,8 @@ library(furrr)
 \ 
 \
 
+Rstudio is best 
+
 # Import Data
 ## Map
 ```{r}
